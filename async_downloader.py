@@ -5,7 +5,6 @@ import os
 import tempfile
 from bs4 import BeautifulSoup
 
-
 async def get_all_file_urls(session, repo_url):
     async with session.get(repo_url) as resp:
         html_content = await resp.text()
@@ -15,14 +14,18 @@ async def get_all_file_urls(session, repo_url):
     file_links = []
     for link in links:
         href = link['href']
-        # Фильтрация только txt файлов
-        if href.endswith('.txt'):
-            file_links.append(href)
+        file_links.append(href)
     return file_links
 
+async def check_file_exists(session, url):
+    async with session.head(url) as resp:
+        return resp.status == 200
 
 async def download_file(session, url):
     filename = os.path.join(tempfile.gettempdir(), url.split('/')[-1])
+    if not await check_file_exists(session, url):
+        print(f"File does not exist: {url}")
+        return None
     async with session.get(url) as resp:
         with open(filename, 'wb') as f_handle:
             while True:
@@ -45,7 +48,7 @@ async def main(repo_url):
             file_urls = await get_all_file_urls(session, repo_url)
             download_tasks = [download_file(session, url) for url in file_urls]
             downloaded_files = await asyncio.gather(*download_tasks)
-            sha256_hashes = [calculate_sha256_for_file(file) for file in downloaded_files]
+            sha256_hashes = [calculate_sha256_for_file(file) for file in downloaded_files if file]
             return sha256_hashes
         except Exception as e:
             print(f"Error processing {repo_url}: {e}")
@@ -53,3 +56,4 @@ async def main(repo_url):
 if __name__ == "__main__":
     repo_url = "https://gitea.radium.group/radium/project-configuration"
     asyncio.run(main(repo_url))
+    
