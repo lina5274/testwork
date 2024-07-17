@@ -1,43 +1,44 @@
-import pytest
-from unittest.mock import patch, MagicMock
-from async_downloader import main, download_file, calculate_sha256
-import os
+import unittest
+from unittest.mock import AsyncMock
+from async_downloader import fetch_file_list, download_file, calculate_sha256, process_file
 
+class TestGiteaDownloader(unittest.TestCase):
+    async def mock_get_response(self, json_data):
+        class MockResponse:
+            @staticmethod
+            async def text():
+                return json_data
+        return MockResponse()
 
-@pytest.mark.asyncio
-@patch('aiohttp.ClientSession.get')
-async def test_download_file(mock_get):
-    mock_response = MagicMock()
-    mock_response.content.read.return_value = b"test content"
-    mock_get.return_value.__aenter__.return_value = mock_response
+    async def mock_session(self):
+        return AsyncMock(spec=aiohttp.ClientSession, get=self.mock_get_response)
 
-    file_path = await download_file("http://example.com")
+    async def test_fetch_file_list(self):
+        session = self.mock_session()
+        json_data = '[{"type": "file", "name": "example.txt", "path": "example.txt"}]'
+        result = await fetch_file_list(session)
+        assert len(result) > 0
+        assert result[0]['type'] == 'file'
 
-    assert os.path.exists(file_path)
-    assert calculate_sha256(file_path) == "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    async def test_download_file(self):
+        session = self.mock_session()
+        file_info = {"download_url": "http://example.com/example.txt", "path": "/example.txt"}
+        temp_dir = "/tmp/test"
+        result = await download_file(session, file_info, temp_dir)
+        assert os.path.exists(result)
 
-    # Удаление файла после теста
-    os.remove(file_path)
+    async def test_calculate_sha256(self):
+        file_path = "/tmp/test/example.txt"
+        result = await calculate_sha256(file_path)
+        assert result[1] == hashlib.sha256(b"").hexdigest()  # Поскольку файл пустой
 
+    async def test_process_file(self):
+        session = self.mock_session()
+        file_info = {"download_url": "http://example.com/example.txt", "path": "/example.txt"}
+        temp_dir = "/tmp/test"
+        result = await process_file(session, file_info, temp_dir)
+        assert result[0] == file_info["path"]
+        assert result[1] == hashlib.sha256(b"").hexdigest()  # Поскольку файл пустой
 
-@pytest.mark.asyncio
-async def test_main():
-    urls = ["http://example.com/file1.txt", "http://example.com/file2.txt", "http://example.com/file3.txt"]
-    with patch('async_downloader.download_file', return_value="tempfile"):
-        hashes = await main(urls)
-
-    assert len(hashes) == len(urls)
-
-
-@patch('builtins.open', new_callable=MagicMock)
-def test_calculate_sha256(mock_open):
-    mock_file = MagicMock(spec=file)
-    mock_open.return_value.__enter__.return_value = mock_file
-
-    # Имитация чтения файла
-    mock_file.read.side_effect = [b"test content", b""]
-
-    # Вызов тестируемой функции
-    hash_value = calculate_sha256("test.txt")
-
-    assert hash_value == "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+if __name__ == '__main__':
+    unittest.main()
