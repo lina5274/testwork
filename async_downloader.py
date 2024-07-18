@@ -1,59 +1,95 @@
-import aiohttp
+"""Script to download and hash repository contents."""
+
 import asyncio
 import hashlib
 import os
 import tempfile
-from bs4 import BeautifulSoup
+from typing import List, Tuple
+import aiofiles
+import aiohttp
+import nest_asyncio
+from aiohttp import ClientSession, ClientResponseError
 
-async def get_all_file_urls(session, repo_url):
-    async with session.get(repo_url) as resp:
-        html_content = await resp.text()
+API_URL = 'https://gitea.radium.group/api/v1'
+REPO_OWNER = 'radium'
+REPO_NAME = 'project-configuration'
+MAX_CONCURRENT_TASKS = 3
 
-    soup = BeautifulSoup(html_content, 'lxml')
-    links = soup.find_all('a', href=True)
-    file_links = []
-    for link in links:
-        href = link['href']
-        file_links.append(href)
-    return file_links
 
-async def check_file_exists(session, url):
-    async with session.head(url) as resp:
-        return resp.status == 200
+async def fetch_file_list(session: ClientSession) -> List[dict]:
+    """Fetch the list of files in the repository."""
+    url = f'{API_URL}/repos/{REPO_OWNER}/{REPO_NAME}/contents'
+    try:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            files = await response.json()
+            return [file for file in files if file['type'] == 'file']
+    except ClientResponseError as e:
+        print(f"Error fetching file list: {e}")
+        return []
 
-async def download_file(session, url):
-    filename = os.path.join(tempfile.gettempdir(), url.split('/')[-1])
-    if not await check_file_exists(session, url):
-        print(f"File does not exist: {url}")
-        return None
-    async with session.get(url) as resp:
-        with open(filename, 'wb') as f_handle:
-            while True:
-                chunk = await resp.content.read(1024)
-                if not chunk:
-                    break
-                f_handle.write(chunk)
-    return filename
 
-async def calculate_sha256_for_file(file_path):
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+async def download_file(session: ClientSession, file_info: dict, temp_dir: str) -> str:
+    """Download a single file from the repository."""
+    url = file_info['download_url']
+    local_path = os.path.join(temp_dir, file_info['path'])
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-async def main(repo_url):
-    async with aiohttp.ClientSession() as session:
-        try:
-            file_urls = await get_all_file_urls(session, repo_url)
-            download_tasks = [download_file(session, url) for url in file_urls]
-            downloaded_files = await asyncio.gather(*download_tasks)
-            sha256_hashes = [calculate_sha256_for_file(file) for file in downloaded_files if file]
-            return sha256_hashes
-        except Exception as e:
-            print(f"Error processing {repo_url}: {e}")
+    try:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            async with aiofiles.open(local_path, mode='wb') as file:
+                await file.write(await response.read())
+        return local_path
+    except ClientResponseError as e:
+        print(f"Error downloading file {file_info['path']}: {e}")
+        return ""
 
-if __name__ == "__main__":
-    repo_url = "https://gitea.radium.group/radium/project-configuration"
-    asyncio.run(main(repo_url))
+
+async def calculate_sha256(file_path: str) -> Tuple[str, str]:
+    """Calculate SHA256 hash of a file."""
+    if not file_path:
+        return "", ""
+    async with aiofiles.open(file_path, mode='rb') as file:
+        file_hash = hashlib.sha256()
+        chunk = await file.read(8192)
+        while chunk:
+            file_hash.update(chunk)
+            chunk = await file.read(8192)
+    return file_path, file_hash.hexdigest()
+
+
+async def process_file(session: ClientSession, file_info: dict, temp_dir: str) -> Tuple[str, str]:
+    """Process a single file: download and calculate hash."""
+    local_path = await download_file(session, file_info, temp_dir)
+    return await calculate_sha256(local_path)
+
+
+async def main() -> None:
+    """Main function to orchestrate the download and hashing process."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        async with aiohttp.ClientSession() as session:
+            file_list = await fetch_file_list(session)
+
+            if not file_list:
+                print("No files found or error occurred while fetching file list.")
+                return
+
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
+            async def bounded_process_file(file_info: dict) -> Tuple[str, str]:
+                async with semaphore:
+                    return await process_file(session, file_info, temp_dir)
+
+            tasks = [bounded_process_file(file_info) for file_info in file_list]
+
+            for completed in asyncio.as_completed(tasks):
+                file_path, file_hash = await completed
+                if file_path and file_hash:
+                    print(f'SHA256 for {file_path}: {file_hash}')
+
+
+if __name__ == '__main__':
+    nest_asyncio.apply()
+    asyncio.run(main())
     
